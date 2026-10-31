@@ -1,0 +1,307 @@
+"""Edit MEA plot flags by re-encoding the plot agent block in place.
+
+The plot block is a bit region inside the save's data block:
+
+    [u24 L0][u24 A][u24 B][body...]        A = 24 + B,  B = 24 + len(body),  L0 = 24 + A
+
+Editing a flag's *value* (int, float) or moving a bool between the false/true lists does
+not change how many bits the block needs, so the region can be rewritten without moving
+anything else. Both CRC-32s are recomputed afterwards.
+
+`verify` re-encodes an untouched save and compares the region with the original bytes:
+that is the proof the encoder reproduces the engine's layout exactly.
+
+Usage:
+  python save_edit.py verify    <save>
+  python save_edit.py set-int   <save> <guid> <value> <out>
+  python save_edit.py set-float <save> <guid> <value> <out>
+  python save_edit.py set-bool  <save> <guid> <true|false> <out>
+"""
+from __future__ import annotations
+
+import argparse
+import binascii
+import struct
+import sys
+from pathlib import Path
+
+import profsave3 as p
+
+CRC_SEED = 0x12345678
+
+
+class BitWriter:
+    """LSB-first bit writer matching the engine's reader."""
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+        self.bit = 0
+
+    def write(self, value: int, nbits: int) -> None:
+        if nbits < 0:
+            raise ValueError("negative bit count")
+        remaining = nbits
+        shift = 0
+        while remaining > 0:
+            offset = self.bit % 8
+            left = min(8 - offset, remaining)
+            mask = (1 << left) - 1
+            if self.bit >> 3 >= len(self.buf):
+                self.buf.append(0)
+            chunk = (value >> shift) & mask
+            self.buf[self.bit >> 3] |= (chunk << offset) & 0xFF
+            remaining -= left
+            shift += left
+            self.bit += left
+
+    def bytes_(self, raw: bytes) -> None:
+        for b in raw:
+            self.write(b, 8)
+
+    def guid(self, text: str) -> None:
+        parts = text.split("-")
+        if len(parts) != 5:
+            raise ValueError(f"bad guid {text!r}")
+        raw = (bytes.fromhex(parts[0])[::-1] + bytes.fromhex(parts[1])[::-1]
+               + bytes.fromhex(parts[2])[::-1] + bytes.fromhex(parts[3]) + bytes.fromhex(parts[4]))
+        if len(raw) != 16:
+            raise ValueError(f"bad guid {text!r}")
+        self.bytes_(raw)
+
+    def string(self, text: str) -> None:
+        raw = text.encode("utf-8")
+        self.write(len(raw), 16)
+        self.bytes_(raw)
+
+    def value(self) -> bytes:
+        return bytes(self.buf)
+
+
+def encode_body(plot: dict) -> tuple[bytes, int]:
+    """Encode the plot payload after the two frame headers."""
+    w = BitWriter()
+    version = plot["version"]
+    w.write(version, 16)
+    if version >= 2:
+        w.string(plot["marker"])
+    nbits = 31 if version >= 4 else 16
+    bools = plot["bools"]
+    false_keys = [k for k, v in bools.items() if not v]
+    true_keys = [k for k, v in bools.items() if v]
+    w.write(len(false_keys), nbits)
+    for k in false_keys:
+        w.guid(k)
+    w.write(len(true_keys), nbits)
+    for k in true_keys:
+        w.guid(k)
+    w.write(len(plot["ints"]), 16)
+    for k, v in plot["ints"].items():
+        w.guid(k)
+        w.write(v & 0xFFFFFFFF, 32)
+    w.write(len(plot["floats"]), 16)
+    for k, v in plot["floats"].items():
+        w.guid(k)
+        w.write(struct.unpack("<I", struct.pack("<f", v))[0], 32)
+    w.write(len(plot["transforms"]), 16)
+    for k, vals in plot["transforms"].items():
+        w.guid(k)
+        for val in vals:
+            w.write(struct.unpack("<I", struct.pack("<f", val))[0], 32)
+    if version >= 3:
+        w.write(len(plot["unknown"]), 16)
+        for k, v in plot["unknown"].items():
+            w.write(16 + 128, 24)  # u32 key + guid payload
+            w.write(k, 32)
+            w.guid(v)
+    return w.buf, w.bit
+
+
+def region(data_block: bytes, save) -> tuple[int, int, int]:
+    """Return (start_bit, end_bit, body_start_bit) of the plot agent payload."""
+    for agent in save.agents:
+        off = agent.offsets[1]
+        if not off:
+            continue
+        r = p.BitReader(data_block, off, len(data_block) * 8 - off)
+        length0 = r.read(24)
+        payload_start = r.pos
+        head = p.BitReader(data_block, payload_start, min(length0, 1024)).bytes_(min(60, length0 // 8))
+        if b"BioMetrics_PlotStartMarker" not in head:
+            continue
+        probe = p.BitReader(data_block, payload_start, length0)
+        p.parse_plot(probe)
+        return off, probe.pos, payload_start
+    raise SystemExit("plot agent not found")
+
+
+def encode_region(plot: dict) -> tuple[bytes, int]:
+    body, body_bits = encode_body(plot)
+    # Frame lengths exclude their own header (verified against a real save):
+    #   B = len(body), A = 24 + B, L0 = 24 + A
+    b_frame = body_bits
+    a_frame = 24 + b_frame
+    l0 = 24 + a_frame
+    w = BitWriter()
+    w.write(l0, 24)
+    w.write(a_frame, 24)
+    w.write(b_frame, 24)
+    for i in range(body_bits):
+        w.write((body[i >> 3] >> (i % 8)) & 1, 1)
+    return w.buf, w.bit
+
+
+def splice(data_block: bytearray, start_bit: int, end_bit: int, new_buf: bytes, new_bits: int) -> bytearray:
+    """Replace [start_bit, end_bit) with new_bits from new_buf; lengths must match."""
+    old_bits = end_bit - start_bit
+    if new_bits != old_bits:
+        raise SystemExit(f"region length changed ({old_bits} -> {new_bits} bits); refusing to splice")
+    if start_bit % 8 != 0:
+        raise SystemExit("region start is not byte aligned")
+    out = bytearray(data_block)
+    start_byte = start_bit // 8
+    nbytes = (new_bits + 7) // 8
+    tail_bits = new_bits % 8
+    for i in range(nbytes):
+        if i == nbytes - 1 and tail_bits:
+            keep_mask = (0xFF << tail_bits) & 0xFF
+            out[start_byte + i] = (out[start_byte + i] & keep_mask) | (new_buf[i] & (0xFF >> (8 - tail_bits)))
+        else:
+            out[start_byte + i] = new_buf[i]
+    return out
+
+
+def rewrite(path: Path, out_path: Path, mutate) -> None:
+    raw = path.read_bytes()
+    header_block, data_block, info = p.unwrap(raw)
+    if not (info["header_crc_ok"] and info["data_crc_ok"]):
+        raise SystemExit("input CRCs are invalid; refusing to write")
+    save = p.load(path)
+    if not save.plot:
+        raise SystemExit("no plot block found")
+    start, end, _ = region(data_block, save)
+    plot = {k: (dict(v) if isinstance(v, dict) else v) for k, v in save.plot.items()}
+    mutate(plot)
+    new_buf, new_bits = encode_region(plot)
+    edited = splice(bytearray(data_block), start, end, new_buf, new_bits)
+
+    header_len = info["header_length"]
+    data_len = info["data_length"]
+    header_crc = struct.unpack_from("<I", raw, 18)[0]
+    new_data_crc = binascii.crc32(bytes(edited), CRC_SEED) & 0xFFFFFFFF
+    out = bytearray(raw[:18 + header_len])
+    out += struct.pack("<I", new_data_crc)
+    out += edited
+    if len(out) != len(raw):
+        raise SystemExit(f"output length {len(out)} != input {len(raw)}")
+    out_path.write_bytes(bytes(out))
+    print(f"wrote {out_path} ({len(out)} bytes, plot region bits {start}..{end})")
+
+
+def apply_batch(save_path: Path, out_path: Path, ops: list[dict]) -> list[str]:
+    """Apply several flag writes in one rewrite. Ops: {kind: bool|int|float, guid, value}.
+
+    Returns a log. Unknown guids are reported and skipped rather than silently dropped.
+    """
+    log: list[str] = []
+
+    def mutate(plot):
+        for op in ops:
+            kind, guid, value = op["kind"], op["guid"], op.get("value")
+            if kind == "bool":
+                if guid not in plot["bools"]:
+                    log.append(f"SKIP bool {guid}: not a bool flag in this save")
+                    continue
+                log.append(f"bool {guid}: {plot['bools'][guid]} -> {bool(value)}")
+                plot["bools"][guid] = bool(value)
+            elif kind == "int":
+                if guid not in plot["ints"]:
+                    log.append(f"SKIP int {guid}: not an int flag in this save")
+                    continue
+                log.append(f"int {guid}: {plot['ints'][guid]} -> {int(value)}")
+                plot["ints"][guid] = int(value)
+            elif kind == "float":
+                if guid not in plot["floats"]:
+                    log.append(f"SKIP float {guid}: not a float flag in this save")
+                    continue
+                log.append(f"float {guid}: {plot['floats'][guid]} -> {float(value)}")
+                plot["floats"][guid] = float(value)
+            else:
+                log.append(f"SKIP unknown kind {kind!r}")
+
+    rewrite(save_path, out_path, mutate)
+    return log
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    v = sub.add_parser("verify")
+    v.add_argument("save", type=Path)
+    si = sub.add_parser("set-int")
+    si.add_argument("save", type=Path)
+    si.add_argument("guid")
+    si.add_argument("value", type=int)
+    si.add_argument("out", type=Path)
+    sf = sub.add_parser("set-float")
+    sf.add_argument("save", type=Path)
+    sf.add_argument("guid")
+    sf.add_argument("value", type=float)
+    sf.add_argument("out", type=Path)
+    sb = sub.add_parser("set-bool")
+    sb.add_argument("save", type=Path)
+    sb.add_argument("guid")
+    sb.add_argument("value", choices=["true", "false"])
+    sb.add_argument("out", type=Path)
+    args = ap.parse_args()
+
+    if args.cmd == "verify":
+        raw = args.save.read_bytes()
+        header_block, data_block, info = p.unwrap(raw)
+        save = p.load(args.save)
+        start, end, _ = region(data_block, save)
+        new_buf, new_bits = encode_region(save.plot)
+        old_bits = end - start
+        print(f"region bits: original {start}..{end} ({old_bits}), re-encoded {new_bits}")
+        if new_bits != old_bits:
+            print("LENGTH MISMATCH")
+            return 1
+        same = True
+        for i in range(new_bits):
+            a = (data_block[(start + i) >> 3] >> ((start + i) % 8)) & 1
+            b = (new_buf[i >> 3] >> (i % 8)) & 1
+            if a != b:
+                same = False
+                print(f"first differing bit at region offset {i} (absolute {start + i})")
+                break
+        print("round-trip identical" if same else "round-trip DIFFERS")
+        return 0 if same else 1
+
+    if args.cmd == "set-int":
+        def mutate(plot):
+            if args.guid not in plot["ints"]:
+                raise SystemExit(f"guid {args.guid} is not an int flag")
+            print(f"int {args.guid}: {plot['ints'][args.guid]} -> {args.value}")
+            plot["ints"][args.guid] = args.value
+        rewrite(args.save, args.out, mutate)
+    elif args.cmd == "set-float":
+        def mutate(plot):
+            if args.guid not in plot["floats"]:
+                raise SystemExit(f"guid {args.guid} is not a float flag")
+            print(f"float {args.guid}: {plot['floats'][args.guid]} -> {args.value}")
+            plot["floats"][args.guid] = args.value
+        rewrite(args.save, args.out, mutate)
+    elif args.cmd == "set-bool":
+        want = args.value == "true"
+
+        def mutate(plot):
+            bools = plot["bools"]
+            if args.guid not in bools:
+                raise SystemExit(f"guid {args.guid} is not a bool flag")
+            print(f"bool {args.guid}: {bools[args.guid]} -> {want}")
+            bools[args.guid] = want
+        rewrite(args.save, args.out, mutate)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

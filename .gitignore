@@ -1,0 +1,28 @@
+# --- game data / third-party content: never commit ---
+Mass Effect Andromeda/
+Mass Effect Andromeda Mods/
+
+# --- build outputs ---
+dist/
+
+# --- reverse-engineering tool installs and their state (hundreds of MB) ---
+tools/ghidra/
+tools/ghidra-projects/
+tools/ghidra-user/
+
+# --- caches ---
+tools/frostbite/_cache/
+tools/npm-cache/
+__pycache__/
+*.pyc
+
+# --- scratch: keep the evidence scripts, drop their outputs and temp dirs ---
+tools/scratch/*
+!tools/scratch/*.py
+!tools/scratch/*.md
+
+# --- third-party binaries (Frosty Tool Suite / RenderDoc / FBX / NVIDIA): not ours to publish ---
+tools/frostyprobe/lib/
+
+# --- saves ---
+*.save

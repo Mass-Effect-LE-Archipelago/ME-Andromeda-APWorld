@@ -1,0 +1,125 @@
+﻿diff --git a/src/MassEffectAPLauncher/Installer.cs b/src/MassEffectAPLauncher/Installer.cs
+index 5d957c9..eff9f0f 100644
+--- a/src/MassEffectAPLauncher/Installer.cs
++++ b/src/MassEffectAPLauncher/Installer.cs
+@@ -49,7 +49,8 @@ sealed class Installer
+     public string BioGame => Path.Combine(Root, "BioGame");
+     public string ModTarget => Path.Combine(BioGame, "DLC", Profile.DlcName);
+     public string WorldTarget => Path.Combine(ApDir, "custom_worlds", Profile.Apworld);
+-    public string GameExe => Path.Combine(Win64, Profile.Exe);
++    public string ExeDir => Profile.Loader == LoaderMode.FrostyMods ? GameDir : Win64;
++    public string GameExe => Path.Combine(ExeDir, Profile.Exe);
+     public string BinkProxy => Path.Combine(Win64, "bink2w64.dll");
+     public string BinkOriginal => Path.Combine(Win64, "bink2w64_original.dll");
+     string ManifestPath => Path.Combine(StateDir, "manifest.json");
+@@ -176,6 +177,7 @@ sealed class Installer
+     // Everything Launch needs: the files Install puts down, unchanged since, and Mod Manager's one-time ASIs.
+     public List<string> LaunchProblems()
+     {
++        if (Profile.Loader == LoaderMode.FrostyMods) return FrostyLaunchProblems();
+         var problems = new List<string>();
+         if (!GameFound) problems.Add("Mass Effect Legendary Edition not found (set its folder on page 1).");
+         if (!ArchipelagoFound) problems.Add("Archipelago not found (set its folder on page 1).");
+@@ -230,6 +232,7 @@ sealed class Installer
+ 
+     public void Install(Options options)
+     {
++        if (Profile.Loader == LoaderMode.FrostyMods) { InstallFrostyMods(options); return; }
+         if (!ArchipelagoFound) throw new InvalidOperationException("Set the Archipelago folder on page 1.");
+         if (!GameFound) throw new InvalidOperationException("Set the Mass Effect Legendary Edition folder on page 1.");
+         RequireArchipelagoClosed(ApDir);
+@@ -272,6 +275,49 @@ sealed class Installer
+             Log.Add($"Still needed before playing: {missing}. {LoaderState()}.");
+     }
+ 
++    // Mass Effect Andromeda: install the world and stage an ordered Frosty mod set. Nothing in the game folder is
++    // touched; the staged mods live in the state folder until the launcher's own Frosty loader applies them.
++    void InstallFrostyMods(Options options)
++    {
++        if (!ArchipelagoFound) throw new InvalidOperationException("Set the Archipelago folder on page 1.");
++        RequireArchipelagoClosed(ApDir);
++        Directory.CreateDirectory(StateDir);
++        _manifest = LoadManifest();
++        if (_manifest.GameDir != null && !SameFolder(_manifest.GameDir, GameDir) || _manifest.ApDir != null && !SameFolder(_manifest.ApDir, ApDir))
++            throw new InvalidOperationException($"{Profile.Title} is installed into other folders ({_manifest.GameDir}, {_manifest.ApDir}): Uninstall first.");
++        _manifest.GameDir = Path.GetFullPath(GameDir);
++        _manifest.ApDir = Path.GetFullPath(ApDir);
++        SaveManifest();
++
++        Place(WorldTarget, Path.Combine(Payload, Profile.Apworld));
++        var modsJson = Path.Combine(Payload, "mods.json");
++        Place(Path.Combine(StateDir, "mods.json"), modsJson);
++
++        var inventory = MeaProfile.ReadInventory(modsJson);
++        var profilePath = Path.Combine(StateDir, "mods-profile.json");
++        var profile = File.Exists(profilePath) ? MeaProfile.Load(profilePath) : MeaProfile.Create(inventory, Payload);
++        profile.Save(profilePath);
++        var result = profile.Deploy(inventory, Path.Combine(Payload, "mods"), Path.Combine(StateDir, "mods"));
++        Log.AddRange(result.Lines);
++        SaveManifest();
++        Log.Add("World installed and the mod set staged.");
++        Log.Add("Applying the mod set to the game is not automatic yet (the launcher's Frosty loader is still being built). " +
++                "Until then, load the staged .fbmod files in Frosty Mod Manager, in the same order.");
++    }
++
++    List<string> FrostyLaunchProblems()
++    {
++        var problems = new List<string>();
++        if (!GameFound) problems.Add("Mass Effect Andromeda not found (set its folder on page 1).");
++        if (!ArchipelagoFound) problems.Add("Archipelago not found (set its folder on page 1).");
++        if (problems.Count > 0) return problems;
++        if (Hash(Path.Combine(Payload, Profile.Apworld)) != Hash(WorldTarget))
++            problems.Add("The Archipelago world is missing or a different version: Install / Repair.");
++        if (!File.Exists(Path.Combine(StateDir, "mods", MeaProfile.ManifestName)))
++            problems.Add("The mod set is not staged: Install / Repair.");
++        return problems;
++    }
++
+     // The mod's file table, as Mod Manager's AutoTOC writes it (LegendaryExplorerCore TOCCreator).
+     void WriteToc()
+     {
+diff --git a/src/MassEffectAPLauncher/Profiles.cs b/src/MassEffectAPLauncher/Profiles.cs
+index 896fc22..c3b4e90 100644
+--- a/src/MassEffectAPLauncher/Profiles.cs
++++ b/src/MassEffectAPLauncher/Profiles.cs
+@@ -6,12 +6,14 @@ enum TocMode
+ {
+     DlcToc,        // LE2/LE3: the DLC folder carries its own PCConsoleTOC.bin
+     Le1Basegame,   // LE1: one TOC for the whole game, BioGame\PCConsoleTOC.bin, with the DLC_MOD files listed (AutoTOC's job)
++    None,          // MEA: Frostbite has no Unreal file table to write
+ }
+ 
+ enum LoaderMode
+ {
+     ApLoader,       // install our own AP ASI Loader (bink2w64 proxy) where no loader is present (ME2, ME3)
+-    RequireExisting // only check: the loader and RequiredAsis come from Mod Manager's one-time ASI step (ME1)
++    RequireExisting, // only check: the loader and RequiredAsis come from Mod Manager's one-time ASI step (ME1)
++    FrostyMods,     // MEA: Frosty .fbmod mods, deployed as an ordered profile; no ASI, no DLC folder
+ }
+ 
+ sealed class GameProfile
+@@ -60,5 +62,23 @@ sealed class GameProfile
+                    "folder and names it in its log. Then: ME3 > New Career > import that career.",
+     };
+ 
+-    public static readonly GameProfile[] All = [ME1, ME2, ME3];
++    public static readonly GameProfile MEA = new()
++    {
++        Id = "MEA", Title = "Mass Effect Andromeda", GameFolder = ".", Exe = "MassEffectAndromeda.exe",
++        ProcessName = "MassEffectAndromeda", Apworld = "mass_effect_andromeda.apworld",
++        Client = "Mass Effect Andromeda Client", OptionsResource = "options-mea.json",
++        Toc = TocMode.None, Loader = LoaderMode.FrostyMods,
++        SaveNote = "Andromeda saves live in Documents\\BioWare\\Mass Effect Andromeda\\Save. Start a new Ryder after " +
++                   "installing the world; the client follows the newest save and binds the career on first connect.",
++    };
++
++    // Where this game's exe sits under a user-chosen root folder. LE games keep the Legendary Edition layout; MEA's
++    // exe is at the install root.
++    public string ExePath(string root) => Loader == LoaderMode.FrostyMods
++        ? Path.Combine(root, Exe)
++        : Path.Combine(root, "Game", GameFolder, "Binaries", "Win64", Exe);
++
++    public static bool FoundIn(string root) => All.Any(p => File.Exists(p.ExePath(root)));
++
++    public static readonly GameProfile[] All = [ME1, ME2, ME3, MEA];
+ }

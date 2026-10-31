@@ -1,0 +1,245 @@
+{
+ "source": "data/asset-names.txt",
+ "note": "codename -> planet mapping is supported by the planet tokens that occur inside each area's asset paths; see docs/WORLD-MODEL.md",
+ "regions": [
+  {
+   "codename": "hub_nexus",
+   "name": "Nexus",
+   "kind": "hub",
+   "assets": 12227,
+   "plot_assets": 118,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "nexus": 12227,
+    "hyperion": 641,
+    "eos": 208,
+    "tempest": 162
+   }
+  },
+  {
+   "codename": "hub_aya",
+   "name": "Aya",
+   "kind": "hub",
+   "assets": 6836,
+   "plot_assets": 101,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "aya": 6836,
+    "tempest": 30,
+    "nexus": 30,
+    "elaaden": 3
+   }
+  },
+  {
+   "codename": "tempest",
+   "name": "Tempest",
+   "kind": "hub",
+   "assets": 4056,
+   "plot_assets": 92,
+   "journal_assets": 10,
+   "planet_tokens": {
+    "tempest": 4056,
+    "nexus": 282,
+    "aya": 43,
+    "eos": 26
+   }
+  },
+  {
+   "codename": "hub_kadara",
+   "name": "Kadara (port)",
+   "kind": "hub",
+   "assets": 659,
+   "plot_assets": 26,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "kadara": 659,
+    "tempest": 6
+   }
+  },
+  {
+   "codename": "hub_meridian",
+   "name": "Meridian",
+   "kind": "hub",
+   "assets": 158,
+   "plot_assets": 1,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "meridian": 158,
+    "tempest": 2
+   }
+  },
+  {
+   "codename": "unc_stormcanyons",
+   "name": "Eos",
+   "kind": "open world",
+   "assets": 1763,
+   "plot_assets": 0,
+   "journal_assets": 1,
+   "planet_tokens": {
+    "nexus": 35,
+    "eos": 8,
+    "tempest": 6
+   }
+  },
+  {
+   "codename": "unc_ice",
+   "name": "Voeld",
+   "kind": "open world",
+   "assets": 9467,
+   "plot_assets": 21,
+   "journal_assets": 35,
+   "planet_tokens": {
+    "voeld": 178,
+    "aya": 58,
+    "nexus": 24,
+    "tempest": 16
+   }
+  },
+  {
+   "codename": "unc_biolumin",
+   "name": "Havarl",
+   "kind": "open world",
+   "assets": 1496,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "havarl": 36,
+    "nexus": 26,
+    "tempest": 9,
+    "aya": 4
+   }
+  },
+  {
+   "codename": "unc_outlaw",
+   "name": "Kadara",
+   "kind": "open world",
+   "assets": 1796,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "nexus": 38,
+    "kadara": 30
+   }
+  },
+  {
+   "codename": "unc_dunes",
+   "name": "Elaaden",
+   "kind": "open world",
+   "assets": 9631,
+   "plot_assets": 10,
+   "journal_assets": 1,
+   "planet_tokens": {
+    "elaaden": 153,
+    "nexus": 24,
+    "eos": 7,
+    "tempest": 6
+   }
+  },
+  {
+   "codename": "unc_lunar",
+   "name": "H-047c",
+   "kind": "open world (space)",
+   "assets": 600,
+   "plot_assets": 2,
+   "journal_assets": 2,
+   "planet_tokens": {
+    "lunar": 600,
+    "h-047": 13,
+    "nexus": 7,
+    "tempest": 7
+   }
+  },
+  {
+   "codename": "crit_city",
+   "name": "Meridian (city)",
+   "kind": "critical path",
+   "assets": 2662,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "meridian": 136,
+    "tempest": 9
+   }
+  },
+  {
+   "codename": "crit_mer",
+   "name": "Meridian finale",
+   "kind": "critical path",
+   "assets": 3356,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "hyperion": 35,
+    "meridian": 14
+   }
+  },
+  {
+   "codename": "crit_khet",
+   "name": "Kett flagship",
+   "kind": "critical path",
+   "assets": 800,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {}
+  },
+  {
+   "codename": "crit_vlt",
+   "name": "Vault (critical)",
+   "kind": "critical path",
+   "assets": 1734,
+   "plot_assets": 0,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "eos": 1,
+    "aya": 1
+   }
+  },
+  {
+   "codename": "crit_ex",
+   "name": "Exaltation facility",
+   "kind": "critical path",
+   "assets": 3134,
+   "plot_assets": 1,
+   "journal_assets": 0,
+   "planet_tokens": {}
+  },
+  {
+   "codename": "m0_prologue",
+   "name": "Hyperion prologue",
+   "kind": "critical path",
+   "assets": 13,
+   "plot_assets": 11,
+   "journal_assets": 1,
+   "planet_tokens": {}
+  },
+  {
+   "codename": "m1_planetside",
+   "name": "Eos landing",
+   "kind": "critical path",
+   "assets": 69,
+   "plot_assets": 68,
+   "journal_assets": 1,
+   "planet_tokens": {}
+  },
+  {
+   "codename": "m5_5_interlude",
+   "name": "Interlude",
+   "kind": "critical path",
+   "assets": 10,
+   "plot_assets": 10,
+   "journal_assets": 0,
+   "planet_tokens": {}
+  },
+  {
+   "codename": "pro_lnd",
+   "name": "Planet landing",
+   "kind": "critical path",
+   "assets": 4010,
+   "plot_assets": 21,
+   "journal_assets": 0,
+   "planet_tokens": {
+    "aya": 1
+   }
+  }
+ ]
+}
