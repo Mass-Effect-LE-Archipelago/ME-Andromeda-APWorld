@@ -42,9 +42,11 @@ def deliver(save_path: Path, out_path: Path, ops: list[dict], backup_dir: Path |
     unexpected = [(k, g, x, y) for k, g, x, y in changed if (k, g) not in expected]
     if unexpected:
         raise SystemExit(f"{len(unexpected)} flag(s) changed that were not requested: {unexpected[:5]}")
-    if save_path.stat().st_size != out_path.stat().st_size:
-        raise SystemExit("output size differs from input; refusing to trust the rewrite")
-    return log + [f"verified {len(changed)} changed flag(s), size unchanged, CRCs recomputed"]
+    inserted = sum(1 for k, _g, x, _y in changed if k == "bools" and x is None)
+    growth = out_path.stat().st_size - save_path.stat().st_size
+    if growth != 16 * inserted:
+        raise SystemExit(f"output grew {growth} bytes, expected {16 * inserted} for {inserted} inserted bool(s)")
+    return log + [f"verified {len(changed)} changed flag(s) ({inserted} inserted, +{growth} bytes), CRCs recomputed"]
 
 
 def selftest(save_path: Path) -> int:
@@ -57,6 +59,8 @@ def selftest(save_path: Path) -> int:
         ops.append({"kind": "bool", "guid": guid, "value": not value})
     for guid, value in ints:
         ops.append({"kind": "int", "guid": guid, "value": int(value) + 7})
+    # An absent bool exercises the insert path (plot block grows, later positions move).
+    ops.append({"kind": "bool", "guid": "00000000-0000-4000-8000-00000000a11e", "value": True})
     scratch = Path(__file__).resolve().parent / "scratch"
     scratch.mkdir(exist_ok=True)
     out = scratch / "effects-selftest.save"

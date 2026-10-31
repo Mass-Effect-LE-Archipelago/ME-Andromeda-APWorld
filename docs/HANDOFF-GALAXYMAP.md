@@ -143,6 +143,107 @@ Script: `tools/scratch/name_event_ids.py`.
 
 ## 5. Open hypotheses, cheapest test first
 
+### RESULTS 2026-10-31: H2 CONFIRMED. Gating is save-side, and no mod is needed.
+
+**Root cause of the "flags are never true" finding: `profsave3.parse_plot` has the bool lists
+backwards.** The first list in the plot block (read at `profsave3.py:229` as `False`) is the game's
+**true** list, and the second (`:231`, read as `True`) is the game's **false** list.
+`save_edit.encode_body` mirrors the reader, so round-trips stay bit-identical; only the labels are
+wrong. Every `True`/`False` the tools print or write for bools is inverted, **including
+`apply_effects.py` / `save_edit.py set-bool`**.
+
+Evidence (`global_squad_*_recruited` across the b191e387 playthrough, value as the reader prints it):
+
+```
+            Ch0 Ch1 Nexus(51) M2(30) Aya(4) ... Meridian(10)
+agm (Jaal)   .   T    T        T      f    ...  f
+asa (Peebee) .   T    T        T      f    ...  f
+hmf (Cora)   f   T    f        f      f    ...  f
+hmm (Liam)   f   T    f        f      f    ...  f
+krm (Drack)  .   T    T        T      f    ...  f
+tuf (Vetra)  .   T    T        f      f    ...  f
+```
+
+Read as-is, the whole squad is "recruited" at M1 and then "un-recruited" for the rest of the game.
+Read inverted, it matches the story: Liam and Cora early, Vetra by M2, Jaal/Peebee/Drack by the Aya
+hub. Likewise `714a5805` (Saajor `AvailableFlag`) first appears at the Meridian hub save
+(`Chapter10`), which means it is set **true** at Meridian, exactly as `galaxymap_unlock_meridian` says.
+
+Tests (owner in game, `Careerb191e387-0ManualSave`, after M5, before M7):
+
+| test | what | result |
+| --- | --- | --- |
+| H2 try 1 | Saajor flag put in the reader's `True` list (= game false), launched from Steam with no mod | no Saajor (as expected, since it wrote false) |
+| H1 / v3 | `build_galaxymap_mod.py --prefab-only --name AP_GalaxyMap_v3 --version 3.00`: CheckOnStart on 38 conditions, 0 flag swaps. Overlay verified: prefab `d2e2d3db6f41 -> d170d38f0a50`, rows vanilla, mods.json v3.00 | **map normal** (usual systems), so arming the conditions is harmless |
+| H2 try 2 | Saajor flag put in the reader's `False` list (= game **true**), Steam, no mod | **Saajor appears on the galaxy map** |
+
+H2 build: the plot block can't grow, so one long-lived game-false flag (`5405c900-…`, false in
+Ch0/Ch33/0Manual/Ch34) was replaced by `714a5805` in the game-true list. Same bit length, both CRCs OK.
+This save's plot region starts at bit 426,778 (not byte aligned), so `save_edit.splice` refuses it; a
+bit-level splice was used, with a round-trip check that the untouched re-encode equals the original file.
+Scripts: `tools/scratch/h2_build.py` (takes the output path as argument), `tools/scratch/h_squad.py` (orientation evidence). Test copy:
+`Save\Careerb191e387-1ManualSave`. The original is untouched, backed up in `backups\Careerb191e387-0ManualSave.h2-orig`.
+
+**Test 3 (fixed writer, real insert, 2026-10-31):** `apply_effects.py` on `0ManualSave` with
+Saajor `714a5805` absent -> true (inserted, +16 bytes, 10 position fields moved) and Gavorkam
+(kadara_01) `d3cce618` true -> false. Owner, Steam, no mod: **Saajor open, Gavorkam locked.** Insertion
+and locking both work in game.
+
+**What this means for the AP world:**
+1. System access is a real lever: write a system's `AvailableFlag` true (game-true list) to unlock it.
+   **Locking** a system that the story already opened means writing it false, which hasn't been tested yet.
+2. Fix the label inversion in `profsave3.parse_plot` and `save_edit.encode_body` (swap which list is
+   true), then re-check `apply_effects.py --selftest` and any earlier conclusion built on bool values
+   (PROGRESSION-LADDER "false -> true" headings, WORLDMAP/matrix outputs, the client's delivery logic).
+3. The writer needs (a) bit-level splicing for unaligned plot regions and (b) insertion of absent flags
+   (grow the region and fix the frame lengths; the data block size and CRC change), so that no
+   stand-in flag has to be removed.
+4. **Sequence-break risk (owner, 2026-10-31):** with Saajor unlocked early on the post-M5 save, the
+   owner could land on Meridian, do the "postgame" visit, return to the Tempest and start the
+   **final mission** by leaving the bridge door. So unlocking a system exposes whatever content the
+   story assumes comes later. Late systems (Saajor especially) must stay behind the goal, or their
+   mission triggers need their own guard.
+   Follow-up (owner): the first Meridian visit forces a landing, so the bridge door can't be reached
+   without that visit. Mid-final-mission the journal still shows the other quests, so the owner is fine
+   with exposing the endgame **if the door itself can be gated** (door = the go-mode check).
+   Save diff (`tools/scratch/diff_door.py`, `door_flags.py`) on the owner's exploration saves:
+   - The story int `771d0593` (read by `hub_meridian_docking_available` and
+     `crit_tempest_0725_meridian_returntocity_available`) jumped **50 -> 61** on the first Tempest
+     autosave after loading the Saajor-true copy (`5AutoSave`). 61 is the normal post-game value
+     (`Chapter10`). So unlocking Saajor pushes the main-story stage forward on its own.
+   - At this save (post-M5) the final mission is the normal next priority op. The door leading into
+     M7 is normal story; the early Saajor unlock only added the Meridian hub visit before it.
+   - Door/M7 candidates: `tempest_main_lock_hallway_door_check` (three condition rules, not yet
+     decoded), `mea_m7_meridian_mission_available` (`5fb38cb4`, `5faef96f`),
+     `crit_tempest_0750_meridian_briefing_available` (`8780521e`, `bce803f0`, set when M7 starts).
+   Door decoded (`tools/scratch/door_check.py`, `asset_flags.py`, `who_imports.py`):
+   `tempest_main_LOCK_hallway_door_check` (MatchType 1 = any) locks the hallway while the Eos prompt,
+   the exit-ark-con scene or the **M7 briefing** is available. The final mission starts from
+   `crit_tempest_0750_meridian_briefing_available` = `bce803f0` true AND `8780521e` false
+   (`8780521e` is set by `pfl_plotflagsetup_m7` when M7 starts). The game sets `bce803f0` itself at
+   runtime, so a save edit can't hold the door; gating it needs an asset patch. Proposed: repoint
+   one rule of that expression to an AP-only go-mode flag (same-size patch, Frosty like v3).
+   **CORRECTION:** both `bce803f0` and `8780521e` are written by `pfl_plotflagsetup_m7` (M7's own
+   setup), and both were absent in `6AutoSave` right before M7 launched. So this expression is not
+   what launches M7 from the door. The real trigger is still unknown; next step is diffing a manual
+   save made just before the bridge door against the autosave after it.
+   **CORRECTION OF THE CORRECTION (owner's bracketing saves, 07:00):** `2ManualSave` (Tempest, before
+   landing) -> `3ManualSave` (Meridian hub) -> `4ManualSave` (Tempest, before the door) -> `Mission`
+   (M7). `bce803f0` becomes **true between Meridian and the Tempest return** (3->4), and `8780521e`
+   becomes true when M7 starts. So the briefing expression *is* the door trigger: the earlier
+   `6AutoSave` was taken on Meridian, before the return. (The join labels both flags with
+   `pfl_plotflagsetup_m7` only because that asset also references them.) Owner confirmed that flying
+   to Meridian without landing does not arm the door.
+   **Save-side gate under test:** pre-set `8780521e` true (the briefing needs it false). The only
+   readers found are the briefing expression and the briefing scene, and its only writer is M7's
+   setup. Test save: `5ManualSave` = `4ManualSave` + `8780521e` inserted true.
+   **Result (owner, 2026-10-31 10:03): the gate works.** The bridge door is an ordinary walk-through
+   door, not the final-mission interaction. Side effect: the journal's "Meridian: The Way Home" shows
+   the **"Chase the Archon in the Nomad"** objective early (normally added when you land for M7), so
+   `8780521e` also drives that journal step. Alternative to test: hold `bce803f0` false instead (the
+   game sets it once on the Meridian return, so the client would clear it after that and set it at go-mode).
+5. H3/H4 are moot. Next test: lock one already-open system (write its flag false) and see whether it disappears.
+
 ### H1 — the conditions are edge-triggered *notifications*; availability comes from quest logic at load
 
 Cheapest test: **v3 = `CheckOnStart = 1` only, real flags untouched.**
@@ -272,3 +373,4 @@ C:\Steam\steamapps\common\Mass Effect Andromeda\                 game (read-only
    the conditions is safe.
 4. Only then H3 (property/`Visible` connection) — needs the field-id name dictionary.
 5. If 1–4 all fail, stop: gating ships as honour-system, and say so in the release notes.
+

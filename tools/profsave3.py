@@ -225,10 +225,12 @@ def parse_plot(r: BitReader, strict: bool = True) -> dict:
     unknown: dict[int, str] = {}
     nbits = 31 if version >= 4 else 16
     if version >= 1:
-        for _ in range(r.u32(nbits)):
-            bools[r.guid()] = False
+        # The TRUE list comes first. Proven 2026-10-31: squad_*_recruited flags follow the story only
+        # in this order, and a Saajor AvailableFlag written to the first list showed the system in game.
         for _ in range(r.u32(nbits)):
             bools[r.guid()] = True
+        for _ in range(r.u32(nbits)):
+            bools[r.guid()] = False
         for _ in range(r.u16()):
             k = r.guid()
             ints[k] = r.i32()
@@ -313,7 +315,11 @@ def parse_data(data_block: bytes) -> tuple[dict, list[Agent], dict, list[dict]]:
     unknown4 = r.u16() if unknown3 >= 5 else 0
     unknown5b = r.boolean()
 
+    # Fields that hold absolute bit positions or the agent-bulk length, as (field_pos, nbits, kind).
+    # save_edit uses them to grow an agent payload (inserting flags) without breaking the layout.
+    fixups: list[tuple[int, int, str]] = [(r.pos, 26, "pos")]
     r.push_frame_position(26)
+    fixups.append((r.pos, 26, "pos"))
     component_data_position = r.u32(26)
 
     entity_bulk_length = r.u32()
@@ -332,10 +338,12 @@ def parse_data(data_block: bytes) -> tuple[dict, list[Agent], dict, list[dict]]:
     unknown10 = r.u32()
     r.pop_frame()
 
+    fixups.append((r.pos, 26, "pos"))
     unknown16 = r.u32(26)
     if unknown16 != unknown9:
         raise SaveFormatError(f"entity block position mismatch {unknown16} != {unknown9}")
 
+    fixups.append((r.pos, 32, "len"))
     agent_bulk_length = r.u32()
     agent_bulk_position = r.pos
     r.skip(agent_bulk_length)
@@ -344,7 +352,10 @@ def parse_data(data_block: bytes) -> tuple[dict, list[Agent], dict, list[dict]]:
     lookup: dict[int, list[int]] = {}
     for _ in range(r.u8(4)):
         index = r.u8()
-        offsets = [r.u32(26) for _ in range(5)]
+        offsets = []
+        for _ in range(5):
+            fixups.append((r.pos, 26, "pos"))
+            offsets.append(r.u32(26))
         for off in offsets:
             if off and not (agent_bulk_position <= off <= agent_bulk_position + agent_bulk_length):
                 raise SaveFormatError(f"agent offset {off} outside agent bulk data")
@@ -356,8 +367,10 @@ def parse_data(data_block: bytes) -> tuple[dict, list[Agent], dict, list[dict]]:
         eid = r.u32()
         o0 = o1 = 0
         if r.boolean():
+            fixups.append((r.pos, 26, "pos"))
             o0 = r.u32(26)
         if r.boolean():
+            fixups.append((r.pos, 26, "pos"))
             o1 = r.u32(26)
         entities.append({"id": eid, "data0": o0, "data1": o1})
 
@@ -451,6 +464,7 @@ def parse_data(data_block: bytes) -> tuple[dict, list[Agent], dict, list[dict]]:
         "agent_payload_bits": {f"{k[0]}:{k[1]}": v for k, v in agent_payloads.items()},
         "bits_total": len(data_block) * 8,
         "bits_consumed": r.pos,
+        "fixups": fixups,
     }
     return info, agents, plot, components
 

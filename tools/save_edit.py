@@ -4,9 +4,11 @@ The plot block is a bit region inside the save's data block:
 
     [u24 L0][u24 A][u24 B][body...]        A = 24 + B,  B = 24 + len(body),  L0 = 24 + A
 
-Editing a flag's *value* (int, float) or moving a bool between the false/true lists does
-not change how many bits the block needs, so the region can be rewritten without moving
-anything else. Both CRC-32s are recomputed afterwards.
+Editing a flag's *value* (int, float) or moving a bool between the true/false lists does
+not change how many bits the block needs, so the region is rewritten in place. Inserting an
+absent bool grows the block by 128 bits; everything after it moves, so the absolute positions
+recorded by profsave3 (`data["fixups"]`) and the container's data length are patched. The
+region need not be byte aligned. Both CRC-32s are recomputed afterwards.
 
 `verify` re-encodes an untouched save and compares the region with the original bytes:
 that is the proof the encoder reproduces the engine's layout exactly.
@@ -28,6 +30,18 @@ from pathlib import Path
 import profsave3 as p
 
 CRC_SEED = 0x12345678
+
+
+def guid_raw(text: str) -> bytes:
+    """GUID text -> the 16 bytes as stored in the save (.NET order)."""
+    parts = text.split("-")
+    if len(parts) != 5:
+        raise ValueError(f"bad guid {text!r}")
+    raw = (bytes.fromhex(parts[0])[::-1] + bytes.fromhex(parts[1])[::-1]
+           + bytes.fromhex(parts[2])[::-1] + bytes.fromhex(parts[3]) + bytes.fromhex(parts[4]))
+    if len(raw) != 16:
+        raise ValueError(f"bad guid {text!r}")
+    return raw
 
 
 class BitWriter:
@@ -59,14 +73,7 @@ class BitWriter:
             self.write(b, 8)
 
     def guid(self, text: str) -> None:
-        parts = text.split("-")
-        if len(parts) != 5:
-            raise ValueError(f"bad guid {text!r}")
-        raw = (bytes.fromhex(parts[0])[::-1] + bytes.fromhex(parts[1])[::-1]
-               + bytes.fromhex(parts[2])[::-1] + bytes.fromhex(parts[3]) + bytes.fromhex(parts[4]))
-        if len(raw) != 16:
-            raise ValueError(f"bad guid {text!r}")
-        self.bytes_(raw)
+        self.bytes_(guid_raw(text))
 
     def string(self, text: str) -> None:
         raw = text.encode("utf-8")
@@ -86,13 +93,15 @@ def encode_body(plot: dict) -> tuple[bytes, int]:
         w.string(plot["marker"])
     nbits = 31 if version >= 4 else 16
     bools = plot["bools"]
-    false_keys = [k for k, v in bools.items() if not v]
-    true_keys = [k for k, v in bools.items() if v]
-    w.write(len(false_keys), nbits)
-    for k in false_keys:
-        w.guid(k)
+    # The game writes each list sorted by serialized GUID bytes; keep that for inserted/moved keys.
+    true_keys = sorted((k for k, v in bools.items() if v), key=guid_raw)
+    false_keys = sorted((k for k, v in bools.items() if not v), key=guid_raw)
+    # TRUE list first (see profsave3.parse_plot).
     w.write(len(true_keys), nbits)
     for k in true_keys:
+        w.guid(k)
+    w.write(len(false_keys), nbits)
+    for k in false_keys:
         w.guid(k)
     w.write(len(plot["ints"]), 16)
     for k, v in plot["ints"].items():
@@ -150,24 +159,54 @@ def encode_region(plot: dict) -> tuple[bytes, int]:
     return w.buf, w.bit
 
 
-def splice(data_block: bytearray, start_bit: int, end_bit: int, new_buf: bytes, new_bits: int) -> bytearray:
-    """Replace [start_bit, end_bit) with new_bits from new_buf; lengths must match."""
-    old_bits = end_bit - start_bit
-    if new_bits != old_bits:
-        raise SystemExit(f"region length changed ({old_bits} -> {new_bits} bits); refusing to splice")
-    if start_bit % 8 != 0:
-        raise SystemExit("region start is not byte aligned")
-    out = bytearray(data_block)
-    start_byte = start_bit // 8
-    nbytes = (new_bits + 7) // 8
-    tail_bits = new_bits % 8
-    for i in range(nbytes):
-        if i == nbytes - 1 and tail_bits:
-            keep_mask = (0xFF << tail_bits) & 0xFF
-            out[start_byte + i] = (out[start_byte + i] & keep_mask) | (new_buf[i] & (0xFF >> (8 - tail_bits)))
+def splice(data_block: bytes, start_bit: int, end_bit: int, new_buf: bytes, new_bits: int) -> bytearray:
+    """Replace bits [start_bit, end_bit) with new_bits from new_buf (LSB-first, any alignment).
+
+    Bits after the region move by new_bits - (end_bit - start_bit); the caller fixes any
+    absolute positions that point past it. The block is padded to whole bytes with zeros.
+    """
+    total = len(data_block) * 8
+    src = int.from_bytes(data_block, "little")
+    region_val = int.from_bytes(new_buf, "little") & ((1 << new_bits) - 1)
+    low = src & ((1 << start_bit) - 1)
+    high = src >> end_bit
+    out_bits = total - (end_bit - start_bit) + new_bits
+    value = low | (region_val << start_bit) | (high << (start_bit + new_bits))
+    return bytearray(value.to_bytes((out_bits + 7) // 8, "little"))
+
+
+def _write_bits(block: bytearray, pos: int, nbits: int, value: int) -> None:
+    for i in range(nbits):
+        j = pos + i
+        if (value >> i) & 1:
+            block[j >> 3] |= 1 << (j & 7)
         else:
-            out[start_byte + i] = new_buf[i]
-    return out
+            block[j >> 3] &= ~(1 << (j & 7)) & 0xFF
+
+
+def _apply_fixups(block: bytearray, save, region_end: int, delta: int) -> int:
+    """Move absolute positions past the plot region by delta and grow the agent-bulk length.
+
+    Done on the original block, before the splice: every fixup field lies outside the plot region
+    and keeps its width, so the recorded positions are valid there; the splice then carries the
+    fields after the region along with everything else. Returns fields patched.
+    """
+    patched = 0
+    reader = p.BitReader(bytes(block), 0, len(block) * 8)
+    for pos, nbits, kind in save.data["fixups"]:
+        reader.pos = pos
+        value = reader.read(nbits)
+        if kind == "len":
+            new = value + delta
+        elif value >= region_end:
+            new = value + delta
+        else:
+            continue
+        if new >= 1 << nbits:
+            raise SystemExit(f"fixup at bit {pos} overflows {nbits} bits")
+        _write_bits(block, pos, nbits, new)
+        patched += 1
+    return patched
 
 
 def rewrite(path: Path, out_path: Path, mutate) -> None:
@@ -182,19 +221,29 @@ def rewrite(path: Path, out_path: Path, mutate) -> None:
     plot = {k: (dict(v) if isinstance(v, dict) else v) for k, v in save.plot.items()}
     mutate(plot)
     new_buf, new_bits = encode_region(plot)
-    edited = splice(bytearray(data_block), start, end, new_buf, new_bits)
+    delta = new_bits - (end - start)
+    if delta % 8:
+        raise SystemExit(f"plot region grew by {delta} bits, not a whole number of bytes")
+    if new_bits >= 1 << 24:
+        raise SystemExit("plot region too large for its 24-bit frame")
+    block = bytearray(data_block)
+    patched = _apply_fixups(block, save, end, delta) if delta else 0
+    edited = splice(block, start, end, new_buf, new_bits)
+    if len(edited) != len(data_block) + delta // 8:
+        raise SystemExit(f"data block {len(data_block)} -> {len(edited)} bytes, expected +{delta // 8}")
 
     header_len = info["header_length"]
-    data_len = info["data_length"]
-    header_crc = struct.unpack_from("<I", raw, 18)[0]
     new_data_crc = binascii.crc32(bytes(edited), CRC_SEED) & 0xFFFFFFFF
     out = bytearray(raw[:18 + header_len])
+    struct.pack_into("<I", out, 14, len(edited) + 4)  # container data length includes its CRC
     out += struct.pack("<I", new_data_crc)
     out += edited
-    if len(out) != len(raw):
-        raise SystemExit(f"output length {len(out)} != input {len(raw)}")
+    if len(out) != len(raw) + delta // 8:
+        raise SystemExit(f"output length {len(out)} != input {len(raw)} + {delta // 8}")
     out_path.write_bytes(bytes(out))
-    print(f"wrote {out_path} ({len(out)} bytes, plot region bits {start}..{end})")
+    p.load(out_path)  # full re-parse: frames, agent offsets and component position must still line up
+    extra = f", grew {delta // 8} bytes, {patched} position field(s) moved" if delta else ""
+    print(f"wrote {out_path} ({len(out)} bytes, plot region bits {start}..{end}{extra})")
 
 
 def apply_batch(save_path: Path, out_path: Path, ops: list[dict]) -> list[str]:
@@ -208,10 +257,9 @@ def apply_batch(save_path: Path, out_path: Path, ops: list[dict]) -> list[str]:
         for op in ops:
             kind, guid, value = op["kind"], op["guid"], op.get("value")
             if kind == "bool":
-                if guid not in plot["bools"]:
-                    log.append(f"SKIP bool {guid}: not a bool flag in this save")
-                    continue
-                log.append(f"bool {guid}: {plot['bools'][guid]} -> {bool(value)}")
+                # Absent bools are inserted: the save only lists flags the game has touched.
+                was = plot["bools"].get(guid, "absent")
+                log.append(f"bool {guid}: {was} -> {bool(value)}")
                 plot["bools"][guid] = bool(value)
             elif kind == "int":
                 if guid not in plot["ints"]:
@@ -295,9 +343,9 @@ def main() -> int:
 
         def mutate(plot):
             bools = plot["bools"]
-            if args.guid not in bools:
+            if args.guid not in bools and (args.guid in plot["ints"] or args.guid in plot["floats"]):
                 raise SystemExit(f"guid {args.guid} is not a bool flag")
-            print(f"bool {args.guid}: {bools[args.guid]} -> {want}")
+            print(f"bool {args.guid}: {bools.get(args.guid, 'absent (inserted)')} -> {want}")
             bools[args.guid] = want
         rewrite(args.save, args.out, mutate)
     return 0
