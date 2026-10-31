@@ -10,7 +10,55 @@ Companion docs: `docs/GALAXYMAP-GATE.md` (detailed evidence), `docs/SYSTEM-NAMES
 
 ---
 
-## 1. Immediate state / restore
+## 0. STATUS 2026-10-31 (end of session): READ THIS FIRST
+
+**Solved, all from the save (no mod), all confirmed in game by the owner:**
+
+| lever | how | proven on |
+| --- | --- | --- |
+| open a system | write its `SystemData.AvailableFlag` **true** (insert if absent) | Saajor `714a5805-…` on `0ManualSave` |
+| lock a system | write its `AvailableFlag` **false** | Gavorkam `d3cce618-…` |
+| hold the final mission | write `8780521e-5c5c-4f70-9607-60a4438601a2` **true**; clear it (false) at go-mode | `4ManualSave` -> `5ManualSave` |
+
+- The 38 system -> flag GUIDs: `python tools\probe_galaxymap_prefab.py avail` (with the fixed reader its
+  "first true" column is now correct).
+- Final-mission door = `crit_tempest_0750_meridian_briefing_available` = `bce803f0` true (the game sets
+  it when you return to the Tempest from your first Meridian landing) AND `8780521e` false (set by M7
+  setup). Cosmetic cost of the gate: the journal shows "Chase the Archon in the Nomad" early. The owner
+  accepted that (option 1, 2026-10-31).
+- Side effect to design around: opening Saajor bumps story int `771d0593` from 50 to 61 (post-game value)
+  on the next autosave. Flying to Meridian without landing does **not** arm the door.
+- Owner's design: go-mode (N macguffins) is what clears `8780521e`; the goal is final mission / credits.
+  Opening Saajor early is fine because the door stays shut until go-mode.
+
+**Tooling fixed (commit `0b96ffd`, pushed):** `tools/profsave3.py` read the bool lists backwards (the
+first list is TRUE). `tools/save_edit.py` / `apply_effects.py` now write TRUE first, keep lists sorted
+like the game, splice at any bit alignment, and **insert** absent bools (+16 bytes each; agent offsets,
+component position and agent-bulk length are moved; output is re-parsed). Regression:
+`python tools\scratch\regress_save_rw.py` (every save round-trips byte-identical; an insert leaves the
+other agents byte-identical). `python tools\apply_effects.py --selftest` passes.
+
+**Open, in priority order:**
+1. **`world/mass_effect_andromeda/profsave.py` still has the inverted bool lists** (lines 229/231). The
+   client's bool detectors ("flag is true") therefore fire on false flags, and anything built from bool
+   values (checks from `tools/build_checks.py`, PROGRESSION-LADDER, `data.py` tables) may be inverted.
+   Fix the copy (or import `tools/profsave3`), then regenerate and re-test.
+2. Wire the levers into the client: on receiving a system-access item, `apply_effects` writes that
+   system's `AvailableFlag` true; at slot start, lock every system not yet granted and pre-set `8780521e`
+   true; at go-mode, write `8780521e` false. Writes must happen while the game is not holding the save
+   (the client edits a save file the player then loads; see `docs/CLIENT.md`).
+3. Map the AP world's access items (`data.ACCESS_ITEMS`) onto the 38 systems (`docs/SYSTEM-NAMES.md`).
+4. Untested: whether a system locked *after* the player has visited it misbehaves (missions in
+   progress there), and the cosmetic/flow effect of clearing `8780521e` at go-mode.
+
+Test saves in `Documents\BioWare\Mass Effect Andromeda\Save` (load-only): `1ManualSave` (Saajor
+inserted + Gavorkam locked), `5ManualSave` (door held). Originals backed up in `backups/`.
+The v3 prefab mod (`dist/galaxy-mods/AP_GalaxyMap_v3*`) is harmless and unneeded; remove it from
+Frosty's mods folder.
+
+---
+
+## 1. Immediate state / restore (historical, before 2026-10-31 evening)
 
 The last in-game test (v2) left the galaxy map **empty** (no systems at all). The mod files have been
 removed from the Frosty mods folder, but Frosty's applied overlay under
